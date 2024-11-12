@@ -717,8 +717,13 @@ def initialize_review_session(pathname, token_data):
     if pathname != CONFIG['REVIEW_PATH'] or not token_data:
         raise PreventUpdate
 
-    reviewed_folders = get_reviewed_folders_from_sheet()
+    user = user_manager.get_user_by_token(token_data['token'])
+    if not user:
+        raise PreventUpdate
+
+    reviewed_folders = get_reviewed_folders_from_sheet(user['username'])
     return {'reviewed': list(reviewed_folders)}
+
 
 
 @callback(
@@ -778,16 +783,19 @@ def log_review_to_sheets_and_session(accept_clicks, reject_clicks, token_data, r
 
 
 
-def get_reviewed_folders_from_sheet(retries=3, delay=1):
-    """Retrieve reviewed folders from the Google Sheet with retries."""
+def get_reviewed_folders_from_sheet(reviewer_username, retries=3, delay=1):
+    """Retrieve reviewed folders from the Google Sheet for a specific reviewer with retries."""
     for attempt in range(retries):
         try:
             response = sheets_service.spreadsheets().values().get(
                 spreadsheetId=SHEET_ID,
-                range='Sheet1!A2:A'
+                range='Sheet1!A2:D'  # Adjusted range to include the 'Reviewer' column
             ).execute()
-            # Convert list of rows to a set of reviewed folder names
-            reviewed_folders = {row[0] for row in response.get('values', []) if row}
+            # Convert list of rows to a set of reviewed folder names by the reviewer
+            reviewed_folders = {
+                row[0] for row in response.get('values', [])
+                if len(row) >= 3 and row[2] == reviewer_username  # Check if 'Reviewer' matches
+            }
             return reviewed_folders
         except Exception as e:
             print(f"Attempt {attempt + 1}: Error retrieving reviewed folders from Google Sheet: {e}")
