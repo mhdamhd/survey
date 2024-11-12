@@ -171,21 +171,23 @@ class UserManager:
 
 
     def load_users_from_sheet(self):
-        """Load all users from Google Sheets at startup."""
+        """Load all users from Google Sheets."""
         try:
             response = self.sheets_service.spreadsheets().values().get(
                 spreadsheetId=self.sheet_id,
-                range='Users!A2:D'  # Assuming the data is in columns A through D
+                range='Users!A2:D'  # Adjust the range as necessary
             ).execute()
             
             if 'values' in response:
+                self.users.clear()
+                self.access_tokens.clear()
                 for row in response['values']:
                     user_id, username, email, access_token = row
                     self.users[user_id] = {
                         'username': username,
                         'email': email,
                         'access_token': access_token,
-                        'assigned_folders': set()  # Initialize with empty set
+                        'assigned_folders': set()
                     }
                     self.access_tokens[access_token] = user_id
             print("Users loaded from Google Sheets successfully.")
@@ -506,6 +508,13 @@ review_app = ImageReviewApp(sheets_manager, user_manager, drive_service)
 
 # Layout Components
 def create_admin_layout():
+    # Get the current users
+    users = user_manager.users
+    user_list = html.Div([
+        dbc.ListGroup([dbc.ListGroupItem(f"{info['username']} ({info['email']})") for info in users.values()])
+    ])
+    options = [{'label': f"{info['username']} ({info['email']})", 'value': user_id} for user_id, info in users.items()]
+
     return dbc.Container([
         html.H1("Image Enhancement Review Dashboard", className='text-center mb-4'),
 
@@ -517,10 +526,12 @@ def create_admin_layout():
                         dbc.Input(id='username-input', placeholder='Username', className='mb-2'),
                         dbc.Input(id='email-input', placeholder='Email', className='mb-2'),
                         dbc.Button("Add User", id='add-user-button', color='primary', className='mb-3'),
-                        html.Div(id='user-list'),
+                        dbc.Button("Refresh Users", id='refresh-users-button', color='secondary', className='mb-3', style={'margin-left': '10px'}),
+                        html.Div(id='user-action-status', className='mt-2'),  # For status messages
+                        html.Div(id='user-list', children=user_list),
                         html.Hr(),
                         html.H6("Registered Users"),
-                        dbc.Checklist(id='user-selection-checklist', options=[], value=[])
+                        dbc.Checklist(id='user-selection-checklist', options=options, value=[])
                     ])
                 ], className='mb-3'),
 
@@ -629,27 +640,47 @@ def display_page(pathname, search):
 
 @callback(
     [Output('user-list', 'children'),
-     Output('user-selection-checklist', 'options')],
-    [Input('add-user-button', 'n_clicks')],
+     Output('user-selection-checklist', 'options'),
+     Output('username-input', 'value'),
+     Output('email-input', 'value'),
+     Output('user-action-status', 'children')],
+    [Input('add-user-button', 'n_clicks'),
+     Input('refresh-users-button', 'n_clicks')],
     [State('username-input', 'value'),
      State('email-input', 'value')]
 )
-def handle_add_user(n_clicks, username, email):
-    if not n_clicks or not username or not email:
-        users = user_manager.users
-        user_list = html.Div([
-            dbc.ListGroup([dbc.ListGroupItem(f"{info['username']} ({info['email']})") for info in users.values()])
-        ])
-        options = [{'label': f"{info['username']} ({info['email']})", 'value': user_id} for user_id, info in users.items()]
-        return user_list, options
+def update_user_list(add_user_clicks, refresh_users_clicks, username, email):
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
-    user_id, _ = user_manager.add_user(username, email)
+    # Initialize return variables
+    user_list = html.Div()
+    options = []
+    username_value = username
+    email_value = email
+    status_message = ''
+
+    if triggered_id == 'add-user-button':
+        if username and email:
+            user_manager.add_user(username, email)
+            status_message = html.Div("User added successfully.", className='text-success')
+            username_value = ''
+            email_value = ''
+        else:
+            status_message = html.Div("Please enter both username and email.", className='text-danger')
+
+    elif triggered_id == 'refresh-users-button':
+        user_manager.load_users_from_sheet()
+        status_message = html.Div("Users refreshed from Google Sheet.", className='text-info')
+
+    # Update user list and options after any action
     users = user_manager.users
     user_list = html.Div([
         dbc.ListGroup([dbc.ListGroupItem(f"{info['username']} ({info['email']})") for info in users.values()])
     ])
     options = [{'label': f"{info['username']} ({info['email']})", 'value': user_id} for user_id, info in users.items()]
-    return user_list, options
+
+    return user_list, options, username_value, email_value, status_message
 
 @callback(
     [Output('distribution-status', 'children'),
