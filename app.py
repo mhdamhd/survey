@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import dash
 from dash import html, dcc, Input, Output, State, callback
 import dash_bootstrap_components as dbc
@@ -11,11 +12,10 @@ from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from io import BytesIO
-from PIL import Image
-import base64
-from googleapiclient.http import MediaIoBaseDownload
-import time
+# from io import BytesIO
+# from PIL import Image
+# import base64
+# from googleapiclient.http import MediaIoBaseDownload
 
 # Initialize the Dash app with Bootstrap
 app = dash.Dash(
@@ -29,6 +29,7 @@ server = app.server  # For production deployment
 
 # Google Sheets and Drive Configuration
 SHEET_ID = '1dzWJ5vqYjIu5UuqwRTdxCf58aIAiQGNntMrXPNf5U2I'
+DATABASE_SHEET_ID = '1VsNv9kAVl-JEA5m8jS2ZNSCrvi8m0GThBZ5b_N9dxII'
 # DRIVE_FOLDER_ID = '1yRERxJiQ86CvkS7vp2qCwPUyg1HK95SW'
 DRIVE_FOLDER_ID = '1AUmkb2SnbayhMGW_xa6NacNfDHY0MDgV'
 # SERVICE_ACCOUNT_FILE = './service_account_key.json'
@@ -51,7 +52,6 @@ creds = service_account.Credentials.from_service_account_info(
     scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 )
 sheets_service = build('sheets', 'v4', credentials=creds)
-drive_service = build('drive', 'v3', credentials=creds)
 
 def get_column_letter(n):
         """Convert a number to a Google Sheets-style column letter."""
@@ -60,6 +60,21 @@ def get_column_letter(n):
             n, remainder = divmod(n - 1, 26)
             result = chr(65 + remainder) + result  # Ensures letters are A-Z only
         return result
+
+def get_folder_names_from_sheet(sheet_id):
+    """Retrieve folder names from the 'Names' sheet in the Google Sheets file."""
+    try:
+        response = sheets_service.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range='Names!A2:A'  # Adjust the range if necessary
+        ).execute()
+        folder_names = [row[0] for row in response.get('values', []) if row]
+        print(f"Retrieved {len(folder_names)} folder names from Google Sheets.")
+        return folder_names
+    except Exception as e:
+        print(f"Error retrieving folder names from Google Sheets: {e}")
+        return []
+
 
 class UserManager:
     """Enhanced user management with secure tokens and folder distribution."""
@@ -196,12 +211,12 @@ class UserManager:
             print(f"Error loading users from Google Sheets: {e}")
 
 
-    def distribute_folders(self, folders, selected_user_ids):
+    def distribute_folders(self, folder_names, selected_user_ids):
         """
-        Distribute folders among selected users evenly and log each distribution in the Distribution sheet.
+        Distribute folder names among selected users evenly and log each distribution in the Distribution sheet.
         """
         try:
-            if not folders or not selected_user_ids:
+            if not folder_names or not selected_user_ids:
                 print("No folders or users to distribute")
                 return False
 
@@ -210,8 +225,8 @@ class UserManager:
 
             # Distribute folders evenly among users
             num_users = len(selected_user_ids)
-            folders_per_user = len(folders) // num_users
-            extra_folders = len(folders) % num_users
+            folders_per_user = len(folder_names) // num_users
+            extra_folders = len(folder_names) % num_users
             folder_index = 0
             rows_to_append = []
 
@@ -221,7 +236,7 @@ class UserManager:
 
                 # Calculate the number of folders for this user
                 num_folders = folders_per_user + (1 if i < extra_folders else 0)
-                user_folders = [folders[folder_index + j]['name'] for j in range(num_folders)]
+                user_folders = [folder_names[folder_index + j] for j in range(num_folders)]
                 token = self.users[user_id]['access_token']
                 folder_index += num_folders
 
@@ -244,7 +259,6 @@ class UserManager:
         except Exception as e:
             print(f"Error in distribute_folders: {e}")
             return False
-
 
     def get_user_row(self, user_id):
         """
@@ -392,119 +406,33 @@ class GoogleSheetsManager:
             return False
 
 class ImageReviewApp:
-    """Application class with folder management, retrieving images from Google Drive."""
+    """Application class that constructs image URLs based on folder names."""
 
-    def __init__(self, sheets_manager, user_manager, drive_service):
-        self.folders = {}
+    def __init__(self, sheets_manager, user_manager):
+        self.folders = {}  # Mapping from folder name to image URLs
         self.sheets_manager = sheets_manager
         self.user_manager = user_manager
-        self.drive_service = drive_service
-        # Fetch folders and create name-to-ID mapping
-        self.folder_name_to_id = self.create_folder_name_to_id_map(DRIVE_FOLDER_ID)
+        # Fetch folder names from the Google Sheets 'Names' sheet
+        self.folder_names = get_folder_names_from_sheet(DATABASE_SHEET_ID)
+        self.construct_folder_image_urls()
 
-    def create_folder_name_to_id_map(self, drive_folder_id):
-        """Fetch folders and create a mapping of folder names to IDs."""
-        folders = get_drive_folders(drive_folder_id)
-        folder_name_to_id = {folder['name']: folder['id'] for folder in folders}
-        return folder_name_to_id
-
-    def fetch_drive_image(self, file_id):
-        """Retrieve image data from Google Drive as a base64-encoded string."""
-        try:
-            request = self.drive_service.files().get_media(fileId=file_id)
-            fh = BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-            fh.seek(0)
-            img = Image.open(fh)
-            buffered = BytesIO()
-            img.save(buffered, format="JPEG")
-            encoded_image = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            return f"data:image/jpeg;base64,{encoded_image}"
-        except HttpError as e:
-            print(f"Error fetching image from Drive: {e}")
-            return None
-        except Exception as e:
-            print(f"Unexpected error while fetching image: {e}")
-            return None
-
-    def process_folder(self, folder_id):
-        """Process a Google Drive folder to retrieve images."""
-        try:
-            print(f"Processing Google Drive folder with ID: {folder_id}")
-            results = self.drive_service.files().list(
-                q=f"'{folder_id}' in parents",
-                fields="files(id, name)"
-            ).execute()
-
-            files = results.get('files', [])
-            photo_file = next((f for f in files if 'photo.jpeg' in f['name'].lower()), None)
-            enhanced_file = next((f for f in files if 'photo_enhanced.jpeg' in f['name'].lower()), None)
-
-            # Check if both required images are found
-            if not photo_file or not enhanced_file:
-                print(f"Missing required images in folder {folder_id}")
-                raise ValueError("Folder must contain 'photo.jpeg' and 'photo_enhanced.jpeg'.")
-
-            # Fetch images, checking if any retrieval fails
-            before_image = self.fetch_drive_image(photo_file['id'])
-            after_image = self.fetch_drive_image(enhanced_file['id'])
-
-            if not before_image or not after_image:
-                print(f"Failed to retrieve one or both images in folder {folder_id}")
-                raise ValueError("Failed to retrieve 'photo.jpeg' or 'photo_enhanced.jpeg'.")
-
-            # Store images if successfully retrieved
-            self.folders[folder_id] = {
-                'before_image': before_image,
-                'after_image': after_image,
+    def construct_folder_image_urls(self):
+        """Construct image URLs for each folder name."""
+        for folder_name in self.folder_names:
+            before_image_url = f"https://magic-rewards.com/maids/output_for_survey/{folder_name}/photo.jpeg"
+            after_image_url = f"https://magic-rewards.com/maids/output_for_survey/{folder_name}/photo_enhanced.jpeg"
+            self.folders[folder_name] = {
+                'before_image_url': before_image_url,
+                'after_image_url': after_image_url,
                 'processed': True,
                 'error': None
             }
-            print(f"Successfully processed folder with ID: {folder_id}")
-            return True
 
-        except Exception as e:
-            error_msg = str(e)
-            print(f"Error processing folder {folder_id}: {error_msg}")
-            self.folders[folder_id] = {'processed': False, 'error': error_msg}
-            return False
-
-
-# Helper function to retrieve folders from Google Drive
-def get_drive_folders(folder_id):
-    """Retrieve all subfolders in the given Google Drive folder, handling pagination."""
-    folders = []
-    page_token = None
-    try:
-        while True:
-            query = f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder'"
-            response = drive_service.files().list(
-                q=query,
-                fields="nextPageToken, files(id, name)",
-                pageToken=page_token
-            ).execute()
-            
-            # Append current page of folders to the list
-            folders.extend(response.get('files', []))
-            page_token = response.get('nextPageToken')
-
-            # Exit if there are no more pages
-            if not page_token:
-                break
-        
-        print(f"Retrieved {len(folders)} folders from Drive.")
-        return folders
-    except Exception as e:
-        print(f"Error retrieving folders: {e}")
-        return []
 
 # Initialize managers
 user_manager = UserManager(sheets_service=sheets_service, sheet_id='1VsNv9kAVl-JEA5m8jS2ZNSCrvi8m0GThBZ5b_N9dxII')
 sheets_manager = GoogleSheetsManager(SHEET_ID, sheets_service)
-review_app = ImageReviewApp(sheets_manager, user_manager, drive_service)
+review_app = ImageReviewApp(sheets_manager, user_manager)
 
 # Layout Components
 def create_admin_layout():
@@ -560,48 +488,30 @@ def create_review_layout(token):
     user = user_manager.get_user_by_token(token)
     if not user:
         return html.Div("Invalid access token", className='text-center p-5')
-
-    # Fetch assigned folders from Distribution sheet
-    assigned_folders = user_manager.get_user_assignments(user['access_token'])
     
-    # Debugging statement
-    print(f"Assigned folders for user {user['username']}: {assigned_folders}")
-
-    if not assigned_folders:
-        return html.Div(f"Welcome, {user['username']}! No folders assigned.", className='text-center p-5')
-
-    # Get the first assigned folder name (we'll start here in the sequence)
-    current_folder_name = assigned_folders[0]
-    current_folder_id = review_app.folder_name_to_id.get(current_folder_name)
-    
-    if not current_folder_id:
-        print(f"Error: Folder ID for name '{current_folder_name}' not found.")
-        return html.Div(f"Error loading data for folder: {current_folder_name}", className='text-danger')
-
-    # Process the folder if not already done
-    if current_folder_id not in review_app.folders:
-        success = review_app.process_folder(current_folder_id)
-        if not success:
-            return html.Div(f"Error processing folder: {current_folder_name}", className='text-danger')
-
-    # Retrieve folder data
-    folder_data = review_app.folders.get(current_folder_id)
-    before_image = folder_data['before_image']
-    after_image = folder_data['after_image']
-
     return dbc.Container([
         html.H2(f"Welcome, {user['username']}!", className='text-center mb-4'),
-        dcc.Store(id='user-token-store', data={'token': token}),  # Store for token
-        dcc.Store(id='review-session-store', data={'reviewed': []}),  # Store for review session
+        dcc.Store(id='user-token-store', data={'token': token}),
+        dcc.Store(id='review-session-store', data={}),  # Initialized empty; data will be set in callback
 
         dbc.Row([
             dbc.Col([
                 html.H5("Before", className='text-center'),
-                html.Img(id='before-image', src=before_image, className='img-fluid', style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}),
+                html.Img(
+                    id='before-image',
+                    src='',  # Initialize with an empty string or placeholder
+                    className='img-fluid',
+                    style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}
+                ),
             ], md=6),
             dbc.Col([
                 html.H5("After", className='text-center'),
-                html.Img(id='after-image', src=after_image, className='img-fluid', style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}),
+                html.Img(
+                    id='after-image',
+                    src='',  # Initialize with an empty string or placeholder
+                    className='img-fluid',
+                    style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}
+                ),
             ], md=6),
         ]),
         dbc.Row([
@@ -692,12 +602,14 @@ def distribute_folders_callback(n_clicks, selected_users):
     if not n_clicks or not selected_users:
         raise PreventUpdate
 
-    folders = get_drive_folders(DRIVE_FOLDER_ID)
-    
-    if not folders:
+    # Get folder names from the 'Names' sheet
+    folder_names = get_folder_names_from_sheet(DATABASE_SHEET_ID)
+
+    if not folder_names:
         return html.Div("No folders available.", className='text-warning'), None
 
-    success = user_manager.distribute_folders(folders, selected_users)
+    # Distribute folders among selected users
+    success = user_manager.distribute_folders(folder_names, selected_users)
     if not success:
         return html.Div("Error distributing folders.", className='text-danger'), None
 
@@ -721,10 +633,17 @@ def initialize_review_session(pathname, token_data):
     if not user:
         raise PreventUpdate
 
+    # Fetch assigned folders once
+    assigned_folders = user_manager.get_user_assignments(user['access_token'])
+
+    # Fetch reviewed folders
     reviewed_folders = get_reviewed_folders_from_sheet(user['username'])
-    return {'reviewed': list(reviewed_folders)}
 
-
+    # Store both assigned and reviewed folders
+    return {
+        'assigned_folders': assigned_folders,
+        'reviewed': list(reviewed_folders)
+    }
 
 @callback(
     Output('review-session-store', 'data', allow_duplicate=True),
@@ -732,27 +651,23 @@ def initialize_review_session(pathname, token_data):
     [State('user-token-store', 'data'), State('review-session-store', 'data')],
     prevent_initial_call=True
 )
-def log_review_to_sheets_and_session(accept_clicks, reject_clicks, token_data, review_data):
-    if not token_data:
+def log_review_to_sheets_and_session(accept_clicks, reject_clicks, token_data, session_data):
+    if not token_data or not session_data:
         raise PreventUpdate
 
     user = user_manager.get_user_by_token(token_data['token'])
     if not user:
         raise PreventUpdate
 
-    # Determine the current folder based on unreviewed list
-    assigned_folders = user_manager.get_user_assignments(user['access_token'])
-    reviewed_set = set(review_data['reviewed']) if review_data else set()
+    assigned_folders = session_data['assigned_folders']
+    reviewed_set = set(session_data['reviewed'])
     unreviewed = [folder for folder in assigned_folders if folder not in reviewed_set]
 
-    # Check if there are folders left to review
     if not unreviewed:
-        return dash.no_update  # No update needed if all folders reviewed
+        return dash.no_update
 
-    # Prepare to log the current folder
     current_folder_name = unreviewed[0]
 
-    # Determine which button was pressed
     ctx = dash.callback_context
     if ctx.triggered:
         button_id = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -772,14 +687,14 @@ def log_review_to_sheets_and_session(accept_clicks, reject_clicks, token_data, r
             ).execute()
         except Exception as e:
             print(f"Error logging review to Google Sheets: {e}")
-            return dash.no_update  # Avoid updating on error
+            return dash.no_update
 
         # Update the reviewed data in session
         reviewed_set.add(current_folder_name)
-        return {'reviewed': list(reviewed_set)}
+        session_data['reviewed'] = list(reviewed_set)
+        return session_data
 
     return dash.no_update
-
 
 
 
@@ -816,46 +731,36 @@ def get_reviewed_folders_from_sheet(reviewer_username, retries=3, delay=1):
     Input('review-session-store', 'data'),
     State('user-token-store', 'data')
 )
-def handle_review(review_data, token_data):
-    if not token_data:
+def handle_review(session_data, token_data):
+    if not token_data or not session_data:
         raise PreventUpdate
 
     user = user_manager.get_user_by_token(token_data['token'])
     if not user:
         raise PreventUpdate
 
-    # Retrieve assigned folders for the user from the Distribution sheet
-    assigned_folders = user_manager.get_user_assignments(user['access_token'])
-    if not assigned_folders:
-        return None, None, 100, "No folders assigned.", {'display': 'none'}
-
-    # Retrieve the reviewed folders from the session store
-    reviewed_folders = set(review_data['reviewed']) if review_data else set()
+    assigned_folders = session_data['assigned_folders']
+    reviewed_folders = set(session_data['reviewed'])
     unreviewed = [folder for folder in assigned_folders if folder not in reviewed_folders]
 
-    # If all folders are reviewed, return the completed message
     if not unreviewed:
         return None, None, 100, "All folders reviewed!", {'display': 'none'}
 
-    # Process the first unreviewed folder
     current_folder_name = unreviewed[0]
-    current_folder_id = review_app.folder_name_to_id.get(current_folder_name)
-    if not current_folder_id or not review_app.process_folder(current_folder_id):
+
+    folder_data = review_app.folders.get(current_folder_name)
+    if not folder_data:
         return None, None, 0, f"Error loading folder {current_folder_name}", {'display': 'none'}
 
-    # Retrieve the images for display
-    folder_data = review_app.folders.get(current_folder_id)
-    before_image = folder_data['before_image']
-    after_image = folder_data['after_image']
+    before_image_url = folder_data['before_image_url']
+    after_image_url = folder_data['after_image_url']
 
-    # Calculate progress
     total_folders = len(assigned_folders)
     reviewed_count = len(reviewed_folders)
     progress = (reviewed_count / total_folders) * 100
     status_message = f"Reviewed {reviewed_count} of {total_folders} folders"
 
-    # Show the buttons now that images are ready
-    return before_image, after_image, progress, status_message, {'display': 'block'}
+    return before_image_url, after_image_url, progress, status_message, {'display': 'block'}
 
 
 if __name__ == '__main__':
