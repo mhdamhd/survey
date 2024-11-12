@@ -38,7 +38,7 @@ SERVICE_ACCOUNT_INFO = json.loads(service_account_key)
 
 # Global configurations
 CONFIG = {
-    'BASE_URL': 'http://localhost:8050',  # Change this in production
+    'BASE_URL': 'https://raw-camel-myownbusiness-b038f14b.koyeb.app',  # Change this in production
     'REVIEW_PATH': '/review'
 }
 
