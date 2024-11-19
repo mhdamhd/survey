@@ -3,11 +3,11 @@ dash-bootstrap-components
 pandas
 # numpy
 plotly
-# xlsxwriter
+xlsxwriter
 gunicorn  # For production server
 # google-auth  # For Google OAuth2 credentials
 # google-api-python-client  # For using Google API (e.g., Google Sheets, Drive, etc.)
-# openpyxl
+openpyxl
 # pyotp
 # pyzbar
 # Pillow
