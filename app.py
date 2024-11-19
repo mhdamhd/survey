@@ -17,7 +17,7 @@ from googleapiclient.errors import HttpError
 # import base64
 # from googleapiclient.http import MediaIoBaseDownload
 
-# Initialize the Dash app with Bootstrap
+# Initialize the Dash app with Bootstraps
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.BOOTSTRAP],
