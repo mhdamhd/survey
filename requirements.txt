@@ -1,7 +1,7 @@
 dash
 dash-bootstrap-components
 pandas
-# numpy
+numpy
 plotly
 xlsxwriter
 gunicorn  # For production server
