@@ -1,767 +1,917 @@
-# app.py
-
-import json
-import os
-import time
+# Part 1: Imports and Constants Setup
 import dash
-from dash import html, dcc, Input, Output, State, callback
+from dash import html, dcc, dash_table, Input, Output, State, callback_context
+from dash.dependencies import ALL, MATCH
 import dash_bootstrap_components as dbc
-from dash.exceptions import PreventUpdate
-import uuid
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import base64
+import io
 from datetime import datetime
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-# from io import BytesIO
-# from PIL import Image
-# import base64
-# from googleapiclient.http import MediaIoBaseDownload
+from typing import Dict, List, Any
 
-# Initialize the Dash app with Bootstraps
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[dbc.themes.BOOTSTRAP],
-    url_base_pathname='/',
-    suppress_callback_exceptions=True
-)
-
-server = app.server  # For production deployment
-
-# Google Sheets and Drive Configuration
-SHEET_ID = '1dzWJ5vqYjIu5UuqwRTdxCf58aIAiQGNntMrXPNf5U2I'
-DATABASE_SHEET_ID = '1VsNv9kAVl-JEA5m8jS2ZNSCrvi8m0GThBZ5b_N9dxII'
-# DRIVE_FOLDER_ID = '1yRERxJiQ86CvkS7vp2qCwPUyg1HK95SW'
-DRIVE_FOLDER_ID = '1AUmkb2SnbayhMGW_xa6NacNfDHY0MDgV'
-# SERVICE_ACCOUNT_FILE = './service_account_key.json'
-service_account_key = os.environ.get('SERVICE_ACCOUNT_KEY', '{}')
-SERVICE_ACCOUNT_INFO = json.loads(service_account_key)
-
-# Global configurations
-CONFIG = {
-    'BASE_URL': 'https://raw-camel-myownbusiness-b038f14b.koyeb.app',  # Change this in production
-    'REVIEW_PATH': '/review'
+# Color scheme for better visual hierarchy
+COLORS = {
+    'primary': '#1e40af',      # Deep blue
+    'secondary': '#3b82f6',    # Bright blue
+    'success': '#059669',      # Green
+    'warning': '#d97706',      # Orange
+    'danger': '#dc2626',       # Red
+    'background': '#f8fafc',   # Light gray
+    'text': '#1e293b',         # Dark gray
+    'border': '#e2e8f0',       # Border gray
+    'highlight': '#dbeafe',    # Light blue
+    'chart_colors': px.colors.qualitative.Set3
 }
 
-# Initialize Google Sheets and Drive API
-# creds = service_account.Credentials.from_service_account_info(
-#     GOOGLE_CREDENTIALS,
-#     scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-# )
-creds = service_account.Credentials.from_service_account_info(
-    SERVICE_ACCOUNT_INFO,
-    scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-)
-sheets_service = build('sheets', 'v4', credentials=creds)
+# Task thresholds (in hours) with default values
+TASK_THRESHOLDS = {
+    'Apply for entry Visa': 24,
+    'Apply for Work Permit - Stage 1': 10000,
+    'Check Entry Visa Immigration Approval': 24,
+    'Check ID application type': 24,
+    'Collect Documents (with missing documents)': 10000,
+    'Fill Information': 10000,
+    'Fix the problem of entry visa (MV)': 48,
+    'Modify EID Application': 240,
+    'Pending medical certificate approval from DHA': 72,
+    'Prepare EID Application (Receival Automated)': 48,
+    'Prepare EID application (Receival Automated)': 48,
+    'Prepare EID Application for Modification': 48,
+    'Prepare folder containing E-visa medical application and EID': 72,
+    'Receipt of EID Card (Card is not printed)': 168,
+    'Receipt of EID Card (Card is printed)': 168,
+    'Repeat Medical': 72,
+    'Upload Contract to Tasheel (Tawjeeh is done)': 10000,
+    'Waiting for Personal Photo': 10000,
+    'Waiting for the maid to go to medical test(CC)': 72,
+    'Waiting for the maid to go to medical test(MV)': 72
+}
 
-def get_column_letter(n):
-        """Convert a number to a Google Sheets-style column letter."""
-        result = ""
-        while n > 0:
-            n, remainder = divmod(n - 1, 26)
-            result = chr(65 + remainder) + result  # Ensures letters are A-Z only
-        return result
-
-def get_folder_names_from_sheet(sheet_id):
-    """Retrieve folder names from the 'Names' sheet in the Google Sheets file."""
-    try:
-        response = sheets_service.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range='Names!A2:A'  # Adjust the range if necessary
-        ).execute()
-        folder_names = [row[0] for row in response.get('values', []) if row]
-        print(f"Retrieved {len(folder_names)} folder names from Google Sheets.")
-        return folder_names
-    except Exception as e:
-        print(f"Error retrieving folder names from Google Sheets: {e}")
-        return []
-
-
-class UserManager:
-    """Enhanced user management with secure tokens and folder distribution."""
-
-    def __init__(self, sheets_service, sheet_id):
-        self.users = {}
-        self.access_tokens = {}
-        self.sheets_service = sheets_service
-        self.sheet_id = sheet_id
-        self.load_users_from_sheet()
-        self.initialize_distribution_sheet()
-        self.pending_distributions = []  # Initialize the list for batch saving
-
-    def initialize_distribution_sheet(self):
-        """Initialize Distribution sheet with token and folder_name columns."""
-        headers = [["token", "folder_name"]]
-        try:
-            result = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Distribution!A1:B1'
-            ).execute()
-
-            if 'values' not in result:
-                # Sheet does not exist or is empty, set up headers
-                self.sheets_service.spreadsheets().values().append(
-                    spreadsheetId=self.sheet_id,
-                    range='Distribution!A1',
-                    valueInputOption='RAW',
-                    insertDataOption='INSERT_ROWS',
-                    body={'values': headers}
-                ).execute()
-                print("Initialized Distribution sheet.")
-        except Exception as e:
-            print(f"Error initializing Distribution sheet: {e}")
+# Assignees list
+ASSIGNEES = [
+    'Chekri Khalife',
+    'Amin',
+    'Mohammed',
+    'Visa Dubai',
+    'Razan',
+    'Maya',
+    'Unassigned'
+]
 
 
-    def add_user(self, username, email):
-        """Add a new user with a secure, unique token and save to Google Sheets."""
-        user_id = str(uuid.uuid4())
-        
-        while True:
-            access_token = str(uuid.uuid4())
-            if access_token not in self.access_tokens:
-                break
-        
-        user_data = {
-            'username': username,
-            'email': email,
-            'access_token': access_token,
-            'assigned_folders': set()  # Using set for efficient operations
-        }
-        self.users[user_id] = user_data
-        self.access_tokens[access_token] = user_id
-        
-        review_url = f"{CONFIG['BASE_URL']}{CONFIG['REVIEW_PATH']}?token={access_token}"
-        
-        # Save the new user to Google Sheets
-        self.save_user_to_sheet(user_id, user_data)
-        
-        return user_id, review_url
+# Priority levels with corresponding colors
+PRIORITY_LEVELS = {
+    'High': COLORS['danger'],
+    'Medium': COLORS['warning'],
+    'Low': COLORS['success']
+}
 
-    def save_user_to_sheet(self, user_id, user_data):
-        """Save a user's details to Google Sheets."""
-        row = [
-            user_id,
-            user_data['username'],
-            user_data['email'],
-            user_data['access_token']
+class DelayedMaidsApp:
+    def __init__(self):
+        """Initialize the Dash application with configurations"""
+        external_stylesheets = [
+            dbc.themes.BOOTSTRAP,
+            'https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css'
         ]
         
+        self.app = dash.Dash(
+            __name__,
+            suppress_callback_exceptions=True,
+            external_stylesheets=external_stylesheets,
+            title='Delayed Maids Dashboard',
+            update_title=None
+        )
+        
+        # Initialize data storage
+        self.current_data = pd.DataFrame()
+        self.task_thresholds = TASK_THRESHOLDS.copy()
+        self.last_update = datetime.now()
+
+    def calculate_priority(self, row: pd.Series) -> str:
+        """Calculate priority based on delay threshold"""
         try:
-            self.sheets_service.spreadsheets().values().append(
-                spreadsheetId=self.sheet_id,
-                range='Users!A2',  # Assuming the user data starts from A2
-                valueInputOption='RAW',
-                insertDataOption='INSERT_ROWS',
-                body={'values': [row]}
-            ).execute()
-        except Exception as e:
-            print(f"Error saving user to Google Sheets: {e}")
-
-    def get_user_by_token(self, token):
-        """Get user information from access token, including assigned folders from Google Sheets."""
-        user_id = self.access_tokens.get(token)
-        if not user_id or user_id not in self.users:
-            return None
-
-        # Attempt to find the row for the user in Google Sheets by matching the user_id
-        try:
-            response = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Users!A2:Z'  # Adjust as needed to ensure you cover all user rows
-            ).execute()
-
-            # Locate the user row
-            for idx, row in enumerate(response.get('values', []), start=2):  # start=2 to match Google Sheets row numbers
-                if row[0] == user_id:  # Assume user_id is in column A
-                    assigned_folders = row[4:]  # Columns E onwards hold folders
-                    self.users[user_id]['assigned_folders'] = set(assigned_folders)
-                    break
-            else:
-                self.users[user_id]['assigned_folders'] = set()  # Default to empty if not found
-
-        except Exception as e:
-            print(f"Error loading assigned folders for user {user_id}: {e}")
-            self.users[user_id]['assigned_folders'] = set()
-
-        return self.users[user_id]
-
-
-    def load_users_from_sheet(self):
-        """Load all users from Google Sheets."""
-        try:
-            response = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Users!A2:D'  # Adjust the range as necessary
-            ).execute()
+            delay = float(row['Real Delay (hours)'])
+            threshold = self.task_thresholds.get(row['Task'], 24)
             
-            if 'values' in response:
-                self.users.clear()
-                self.access_tokens.clear()
-                for row in response['values']:
-                    user_id, username, email, access_token = row
-                    self.users[user_id] = {
-                        'username': username,
-                        'email': email,
-                        'access_token': access_token,
-                        'assigned_folders': set()
-                    }
-                    self.access_tokens[access_token] = user_id
-            print("Users loaded from Google Sheets successfully.")
+            if delay > threshold * 2:
+                return 'High'
+            elif delay > threshold:
+                return 'Medium'
+            return 'Low'
+        except:
+            return 'Low'
 
-        except Exception as e:
-            print(f"Error loading users from Google Sheets: {e}")
-
-
-    def distribute_folders(self, folder_names, selected_user_ids):
-        """
-        Distribute folder names among selected users evenly and log each distribution in the Distribution sheet.
-        """
+    def process_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Process the uploaded data with proper task handling"""
         try:
-            if not folder_names or not selected_user_ids:
-                print("No folders or users to distribute")
-                return False
-
-            # Initialize distribution sheet if needed
-            self.initialize_distribution_sheet()
-
-            # Distribute folders evenly among users
-            num_users = len(selected_user_ids)
-            folders_per_user = len(folder_names) // num_users
-            extra_folders = len(folder_names) % num_users
-            folder_index = 0
-            rows_to_append = []
-
-            for i, user_id in enumerate(selected_user_ids):
-                if user_id not in self.users:
-                    continue
-
-                # Calculate the number of folders for this user
-                num_folders = folders_per_user + (1 if i < extra_folders else 0)
-                user_folders = [folder_names[folder_index + j] for j in range(num_folders)]
-                token = self.users[user_id]['access_token']
-                folder_index += num_folders
-
-                # Prepare data to append to "Distribution" sheet
-                for folder_name in user_folders:
-                    rows_to_append.append([token, folder_name])
-
-            # Append rows to "Distribution" sheet
-            self.sheets_service.spreadsheets().values().append(
-                spreadsheetId=self.sheet_id,
-                range='Distribution!A2',
-                valueInputOption='RAW',
-                insertDataOption='INSERT_ROWS',
-                body={'values': rows_to_append}
-            ).execute()
-
-            print("Folders distributed and logged in Distribution sheet successfully.")
-            return True
-
-        except Exception as e:
-            print(f"Error in distribute_folders: {e}")
-            return False
-
-    def get_user_row(self, user_id):
-        """
-        Retrieve the row number for a specific user by user_id in Google Sheets.
-        Assumes that the user_id is located in column A of the 'Users' sheet.
-        """
-        try:
-            response = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Users!A2:A'  # Adjust the range if necessary
-            ).execute()
-
-            # Google Sheets rows are 1-indexed, and our range starts from row 2
-            for idx, row in enumerate(response.get('values', []), start=2):  # start=2 to match the row number
-                if row[0] == user_id:
-                    return idx
-
-            print(f"User ID {user_id} not found in Google Sheets.")
-            return None
-
-        except Exception as e:
-            print(f"Error retrieving user row: {e}")
-            return None
-
-    def save_batch_to_sheet(self):
-        """Save the assigned folders as additional columns in each user's row."""
-        if not self.pending_distributions:
-            print("No pending distributions to save.")
-            return
-
-        try:
-            # Retrieve existing data to find the row numbers for each user
-            existing_data = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Users!A2:D'  # Adjust if needed
-            ).execute().get('values', [])
-
-            # Dictionary to map user_id to row index (Google Sheets rows are 1-indexed)
-            user_row_map = {row[0]: idx + 2 for idx, row in enumerate(existing_data)}  # Start from A2
-
-            # Prepare batch update for each user's row with folder names
-            data_to_update = []
-            for folder_name, _, username, _ in self.pending_distributions:
-                user_id = next((user_id for user_id, info in self.users.items() if info['username'] == username), None)
-                if user_id and user_id in user_row_map:
-                    row_number = user_row_map[user_id]  # Ensure row_number is a valid integer
-                    range_to_update = f'Users!E{row_number}'  # Format correctly as 'Users!E2', etc.
-                    data_to_update.append({
-                        'range': range_to_update,
-                        'majorDimension': 'ROWS',
-                        'values': [[folder_name]]
-                    })
-
-            # Execute batch update with the accumulated data for all users
-            if data_to_update:
-                try:
-                    self.sheets_service.spreadsheets().values().batchUpdate(
-                        spreadsheetId=self.sheet_id,
-                        body={'data': data_to_update, 'valueInputOption': 'RAW'}
-                    ).execute()
-                    print("Folders successfully updated for each user.")
-                except Exception as e:
-                    print(f"Error saving folders to Google Sheets: {e}")
-
-        except Exception as e:
-            print(f"Error saving batch to Google Sheets: {e}")
-
-    def get_user_assignments(self, token):
-        """Retrieve folders assigned to a specific user from the Distribution sheet."""
-        try:
-            response = self.sheets_service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Distribution!A2:B'
-            ).execute()
-
-            # Retrieve folders assigned to this token
-            assigned_folders = [
-                row[1] for row in response.get('values', []) if row[0] == token
-            ]
+            # Clean column names
+            df.columns = df.columns.str.strip()
             
-            # Debugging statement
-            print(f"Assigned folders for token {token}: {assigned_folders}")
+            # Forward fill Task column (handle grouped tasks)
+            current_task = None
+            tasks = []
             
-            return assigned_folders
-
+            for task in df['Task']:
+                if pd.notna(task) and str(task).strip():
+                    current_task = str(task).strip()
+                tasks.append(current_task)
+            
+            df['Task'] = tasks
+            
+            # Add required columns
+            df['Threshold Hours'] = df['Task'].map(self.task_thresholds)
+            
+            # Set default values for tracking columns
+            if 'Assignee' not in df.columns:
+                df['Assignee'] = 'Unassigned'
+            if 'Notes' not in df.columns:
+                df['Notes'] = ''
+            
+            df['Last Updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Convert date columns
+            date_columns = ['Task Move in Date', 'Work Permit Expiry Date']
+            for col in date_columns:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], format='%m/%d/%Y %I:%M:%S %p', errors='coerce')
+            
+            # Process numeric columns
+            if 'Real Delay (hours)' in df.columns:
+                df['Real Delay (hours)'] = pd.to_numeric(df['Real Delay (hours)'], errors='coerce')
+            
+            # Calculate delay status and priority
+            df['Is Delayed'] = df.apply(
+                lambda row: row['Real Delay (hours)'] > self.task_thresholds.get(row['Task'], 24) 
+                if pd.notna(row['Real Delay (hours)']) and pd.notna(row['Task']) 
+                else False,
+                axis=1
+            )
+            
+            df['Priority'] = df.apply(self.calculate_priority, axis=1)
+            
+            return df
+            
         except Exception as e:
-            print(f"Error retrieving assignments for token {token}: {e}")
-            return []
-
-class GoogleSheetsManager:
-    """Simplified Google Sheets integration with specific columns."""
-
-    def __init__(self, sheet_id, service):
-        self.sheet_id = sheet_id
-        self.service = service
-        self.initialize_sheet()
-
-    def initialize_sheet(self):
-        """Initialize sheet with specified columns."""
-        headers = [[
-            'Folder',
-            'Review Date',
-            'Reviewer',
-            'Decision'
-        ]]
-
+            print(f"Error processing data: {e}")
+            return pd.DataFrame()
+    def create_summary_charts(self, df: pd.DataFrame) -> Dict[str, go.Figure]:
+        """Create improved summary charts for the dashboard"""
+        charts = {}
+        
         try:
-            result = self.service.spreadsheets().values().get(
-                spreadsheetId=self.sheet_id,
-                range='Sheet1!A1:D1'
-            ).execute()
-
-            if 'values' not in result:
-                self.service.spreadsheets().values().append(
-                    spreadsheetId=self.sheet_id,
-                    range='Sheet1!A1',
-                    valueInputOption='RAW',
-                    insertDataOption='INSERT_ROWS',
-                    body={'values': headers}
-                ).execute()
+            # Only process delayed cases
+            delayed_df = df[df['Is Delayed']]
+            
+            if len(delayed_df) == 0:
+                # Return empty figures if no delayed cases
+                return {
+                    'type': go.Figure(),
+                    'status': go.Figure(),
+                    'task': go.Figure()
+                }
+            
+            # 1. Type Distribution (Pie Chart)
+            type_counts = delayed_df['Housemaid Type'].value_counts()
+            type_percentages = (type_counts / len(delayed_df) * 100).round(1)
+            
+            charts['type'] = px.pie(
+                values=type_counts.values,
+                names=type_counts.index,
+                title='Type Distribution of Delayed Cases',
+                color_discrete_sequence=px.colors.qualitative.Set3
+            )
+            charts['type'].update_traces(
+                textinfo='value+percent',
+                hovertemplate="<b>%{label}</b><br>" +
+                             "Count: %{value}<br>" +
+                             "Percentage: %{percent}<extra></extra>"
+            )
+            
+            # 2. Status Distribution (Simplified Bar Chart)
+            status_data = delayed_df['Housemaid Status'].value_counts()
+            status_df = pd.DataFrame({
+                'Status': status_data.index,
+                'Count': status_data.values,
+                'Percentage': (status_data.values / len(delayed_df) * 100).round(1)
+            }).sort_values('Count', ascending=True)  # Sort for better visualization
+            
+            charts['status'] = go.Figure(data=[
+                go.Bar(
+                    x=status_df['Count'],
+                    y=status_df['Status'],
+                    orientation='h',
+                    text=[f"{count} ({pct}%)" for count, pct in zip(status_df['Count'], status_df['Percentage'])],
+                    textposition='auto',
+                    marker_color=COLORS['secondary']
+                )
+            ])
+            
+            charts['status'].update_layout(
+                title='Status Distribution of Delayed Cases',
+                xaxis_title='Number of Cases',
+                yaxis_title='',
+                showlegend=False,
+                height=max(len(status_df) * 40 + 100, 400)  # Dynamic height based on number of statuses
+            )
+            
+            # 3. Task Distribution (Table format instead of graph)
+            task_data = delayed_df['Task'].value_counts()
+            task_df = pd.DataFrame({
+                'Task': task_data.index,
+                'Count': task_data.values,
+                'Percentage': (task_data.values / len(delayed_df) * 100).round(1)
+            }).sort_values('Count', ascending=False)
+            
+            charts['task'] = go.Figure(data=[
+                go.Table(
+                    header=dict(
+                        values=['<b>Task</b>', '<b>Count</b>', '<b>Percentage</b>'],
+                        fill_color=COLORS['primary'],
+                        align='left',
+                        font=dict(color='white', size=12)
+                    ),
+                    cells=dict(
+                        values=[
+                            task_df['Task'],
+                            task_df['Count'],
+                            task_df['Percentage'].apply(lambda x: f"{x}%")
+                        ],
+                        align='left',
+                        font=dict(size=11),
+                        height=30,
+                        fill_color=[
+                            [COLORS['background'] if i % 2 == 0 else 'white' for i in range(len(task_df))]
+                        ]
+                    )
+                )
+            ])
+            
+            charts['task'].update_layout(
+                title='Current Visa Step Distribution',
+                margin=dict(l=10, r=10, t=40, b=10),
+                height=max(len(task_df) * 30 + 100, 400)  # Dynamic height based on number of tasks
+            )
+            
+            # Update layout for all charts
+            for chart in charts.values():
+                chart.update_layout(
+                    plot_bgcolor='white',
+                    paper_bgcolor='white',
+                    font_family='system-ui',
+                    title={
+                        'x': 0.5,
+                        'xanchor': 'center',
+                        'font': {'size': 16}
+                    },
+                    margin=dict(t=50, l=10, r=10, b=10)
+                )
+            
         except Exception as e:
-            print(f"Error initializing sheet: {e}")
-            raise
-
-    def log_review(self, folder_name, reviewer, decision):
-        """Log review with essential fields only."""
-        row = [
-            folder_name,
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            reviewer,
-            decision
-        ]
-
-        try:
-            self.service.spreadsheets().values().append(
-                spreadsheetId=self.sheet_id,
-                range='Sheet1!A2',
-                valueInputOption='RAW',
-                insertDataOption='INSERT_ROWS',
-                body={'values': [row]}
-            ).execute()
-            return True
-        except Exception as e:
-            print(f"Error logging review: {e}")
-            return False
-
-class ImageReviewApp:
-    """Application class that constructs image URLs based on folder names."""
-
-    def __init__(self, sheets_manager, user_manager):
-        self.folders = {}  # Mapping from folder name to image URLs
-        self.sheets_manager = sheets_manager
-        self.user_manager = user_manager
-        # Fetch folder names from the Google Sheets 'Names' sheet
-        self.folder_names = get_folder_names_from_sheet(DATABASE_SHEET_ID)
-        self.construct_folder_image_urls()
-
-    def construct_folder_image_urls(self):
-        """Construct image URLs for each folder name."""
-        for folder_name in self.folder_names:
-            before_image_url = f"https://magic-rewards.com/maids/output_for_survey/{folder_name}/photo.jpeg"
-            after_image_url = f"https://magic-rewards.com/maids/output_for_survey/{folder_name}/photo_enhanced.jpeg"
-            self.folders[folder_name] = {
-                'before_image_url': before_image_url,
-                'after_image_url': after_image_url,
-                'processed': True,
-                'error': None
+            print(f"Error creating charts: {e}")
+            charts = {
+                'type': go.Figure(),
+                'status': go.Figure(),
+                'task': go.Figure()
             }
+        
+        return charts
+    
+    def create_datatable_columns(self):
+        """Create columns configuration for the DataTable"""
+        return [
+            {'name': 'Task', 'id': 'Task'},
+            {'name': 'Housemaid Name', 'id': 'Housemaid Name'},
+            {'name': 'Nationality', 'id': 'Housemaid Nationality'},
+            {'name': 'Type', 'id': 'Housemaid Type'},
+            {'name': 'Status', 'id': 'Housemaid Status'},
+            {
+                'name': 'Real Delay (hours)', 
+                'id': 'Real Delay (hours)',
+                'type': 'numeric',
+                'format': {'specifier': '.1f'}
+            },
+            {
+                'name': 'Threshold Hours', 
+                'id': 'Threshold Hours',
+                'type': 'numeric'
+            },
+            {'name': 'Duration in Task', 'id': 'Duration in The Task'},
+            {
+                'name': 'Assignee', 
+                'id': 'Assignee', 
+                'presentation': 'dropdown',
+                'editable': True
+            },
+            {
+                'name': 'Notes', 
+                'id': 'Notes', 
+                'presentation': 'markdown',
+                'editable': True
+            },
+            {'name': 'Last Updated', 'id': 'Last Updated'}
+        ]
 
-
-# Initialize managers
-user_manager = UserManager(sheets_service=sheets_service, sheet_id='1VsNv9kAVl-JEA5m8jS2ZNSCrvi8m0GThBZ5b_N9dxII')
-sheets_manager = GoogleSheetsManager(SHEET_ID, sheets_service)
-review_app = ImageReviewApp(sheets_manager, user_manager)
-
-# Layout Components
-def create_admin_layout():
-    # Get the current users
-    users = user_manager.users
-    user_list = html.Div([
-        dbc.ListGroup([dbc.ListGroupItem(f"{info['username']} ({info['email']})") for info in users.values()])
-    ])
-    options = [{'label': f"{info['username']} ({info['email']})", 'value': user_id} for user_id, info in users.items()]
-
-    return dbc.Container([
-        html.H1("Image Enhancement Review Dashboard", className='text-center mb-4'),
-
-        dbc.Row([
-            dbc.Col([
+    def create_datatable_style_conditions(self):
+        """Create style conditions for the DataTable"""
+        return [
+            # Priority-based styling
+            {
+                'if': {
+                    'column_id': 'Priority',
+                    'filter_query': '{Priority} eq "High"'
+                },
+                'backgroundColor': 'rgba(220, 38, 38, 0.1)',
+                'color': COLORS['danger']
+            },
+            {
+                'if': {
+                    'column_id': 'Priority',
+                    'filter_query': '{Priority} eq "Medium"'
+                },
+                'backgroundColor': 'rgba(217, 119, 6, 0.1)',
+                'color': COLORS['warning']
+            },
+            {
+                'if': {
+                    'column_id': 'Priority',
+                    'filter_query': '{Priority} eq "Low"'
+                },
+                'backgroundColor': 'rgba(5, 150, 105, 0.1)',
+                'color': COLORS['success']
+            },
+            # Unassigned cases styling
+            {
+                'if': {
+                    'column_id': 'Assignee',
+                    'filter_query': '{Assignee} eq "Unassigned"'
+                },
+                'backgroundColor': 'rgba(239, 68, 68, 0.1)',
+                'color': COLORS['danger']
+            },
+            # Delay threshold styling
+            {
+                'if': {
+                    'column_id': 'Real Delay (hours)',
+                    'filter_query': f'{{Real Delay (hours)}} >= {{Threshold Hours}}'
+                },
+                'backgroundColor': 'rgba(220, 38, 38, 0.1)',
+                'color': COLORS['danger']
+            }
+        ]
+    
+    def create_datatable_style_header(self):
+        """Create header style for the DataTable"""
+        return {
+            'backgroundColor': COLORS['primary'],
+            'color': 'white',
+            'fontWeight': 'bold',
+            'textAlign': 'left',
+            'padding': '12px 15px',
+            'whiteSpace': 'normal',
+            'height': 'auto',
+        }
+    
+    def create_datatable_style_cell(self):
+        """Create cell style for the DataTable"""
+        return {
+            'padding': '12px 15px',
+            'textAlign': 'left',
+            'fontFamily': 'system-ui',
+            'fontSize': '14px',
+            'color': COLORS['text'],
+            'whiteSpace': 'normal',
+            'height': 'auto',
+        }
+    def setup_layout(self):
+        """Setup the dashboard layout with enhanced UI"""
+        self.app.layout = html.Div([
+            # Navigation Bar
+            html.Div([
+                html.Div([
+                    html.H1("Delayed Maids Dashboard", 
+                           className='text-2xl font-bold text-white'),
+                    html.P(id='last-update-time',
+                          className='text-sm text-blue-100')
+                ]),
+                html.Div([
+                    dcc.Upload(
+                        id='upload-data',
+                        children=html.Div([
+                            html.I(className="fas fa-upload mr-2"),
+                            "Upload Excel"
+                        ], className='bg-white text-blue-600 px-4 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200 cursor-pointer flex items-center'),
+                        multiple=False,
+                        accept='.xlsx, .xls'
+                    ),
+                    html.Button([
+                        html.I(className="fas fa-download mr-2"),
+                        "Export Data"
+                    ],
+                    id='export-button',
+                    className='ml-4 bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition-colors duration-200 flex items-center'
+                    ),
+                    dcc.Download(id='download-dataframe-xlsx'),
+                ], className='flex items-center')
+            ], className='flex justify-between items-center p-4 bg-gradient-to-r from-blue-600 to-blue-800 shadow-lg'),
+    
+            # Main Content
+            html.Div([
+                # Statistics Cards
+                html.Div([
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Card([
+                                html.Div([
+                                    html.H3("Total Delayed Cases", 
+                                           className='text-gray-600 font-semibold'),
+                                    html.Div([
+                                        html.P(id='total-delayed-cases',
+                                              className='text-3xl font-bold text-blue-600 mb-1'),
+                                        html.P("cases requiring attention", 
+                                              className='text-sm text-gray-500')
+                                    ])
+                                ], className='p-4')
+                            ], className='h-100 shadow-lg border-l-4 border-blue-600')
+                        ], width=4),
+                        
+                        dbc.Col([
+                            dbc.Card([
+                                html.Div([
+                                    html.H3("Critical Delays", 
+                                           className='text-gray-600 font-semibold'),
+                                    html.Div([
+                                        html.P(id='critical-cases',
+                                              className='text-3xl font-bold text-red-600 mb-1'),
+                                        html.P("high priority cases", 
+                                              className='text-sm text-gray-500')
+                                    ])
+                                ], className='p-4')
+                            ], className='h-100 shadow-lg border-l-4 border-red-600')
+                        ], width=4),
+                        
+                        dbc.Col([
+                            dbc.Card([
+                                html.Div([
+                                    html.H3("Unassigned Cases", 
+                                           className='text-gray-600 font-semibold'),
+                                    html.Div([
+                                        html.P(id='unassigned-cases',
+                                              className='text-3xl font-bold text-orange-500 mb-1'),
+                                        html.P("need assignment", 
+                                              className='text-sm text-gray-500')
+                                    ])
+                                ], className='p-4')
+                            ], className='h-100 shadow-lg border-l-4 border-orange-500')
+                        ], width=4),
+                    ], className='mb-4'),
+                ]),
+    
+                # Task Thresholds Settings
+                dbc.Collapse([
+                    dbc.Card([
+                        dbc.CardHeader([
+                            html.H2("Task Delay Thresholds", className='text-xl font-bold mb-0'),
+                            html.P("Set delay thresholds for each task (in hours)", 
+                                 className='text-sm text-gray-500 mt-1 mb-0')
+                        ]),
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Div([
+                                        html.Label(
+                                            task,
+                                            className='text-sm font-medium text-gray-700 mb-1'
+                                        ),
+                                        dbc.Input(
+                                            id={'type': 'threshold-input', 'task': task},
+                                            type='number',
+                                            value=hours,
+                                            min=0,
+                                            className='mb-2'
+                                        )
+                                    ]) for task, hours in self.task_thresholds.items()
+                                ], width=12, className='grid grid-cols-4 gap-4')
+                            ]),
+                            dbc.Button(
+                                "Update Thresholds",
+                                id='update-thresholds-button',
+                                color='primary',
+                                className='mt-3'
+                            )
+                        ])
+                    ], className='mb-4')
+                ], id='threshold-settings-collapse', is_open=False),
+                
+                dbc.Button(
+                    "Toggle Threshold Settings",
+                    id='toggle-threshold-settings',
+                    color='secondary',
+                    className='mb-4'
+                ),
+    
+                # Filters Section
                 dbc.Card([
-                    dbc.CardHeader("User Management"),
+                    dbc.CardHeader("Filters"),
                     dbc.CardBody([
-                        dbc.Input(id='username-input', placeholder='Username', className='mb-2'),
-                        dbc.Input(id='email-input', placeholder='Email', className='mb-2'),
-                        dbc.Button("Add User", id='add-user-button', color='primary', className='mb-3'),
-                        dbc.Button("Refresh Users", id='refresh-users-button', color='secondary', className='mb-3', style={'margin-left': '10px'}),
-                        html.Div(id='user-action-status', className='mt-2'),  # For status messages
-                        html.Div(id='user-list', children=user_list),
-                        html.Hr(),
-                        html.H6("Registered Users"),
-                        dbc.Checklist(id='user-selection-checklist', options=options, value=[])
+                        dbc.Row([
+                            dbc.Col([
+                                html.Label(
+                                    "Task Filter",
+                                    className='font-medium text-gray-700'
+                                ),
+                                dcc.Dropdown(
+                                    id='task-filter',
+                                    multi=True,
+                                    placeholder="Select tasks...",
+                                    style={'width': '250px'}  # adjust width as needed
+                                )
+                            ], width=3),
+                            
+                            dbc.Col([
+                                html.Label(
+                                    "Nationality Filter",
+                                    className='font-medium text-gray-700'
+                                ),
+                                dcc.Dropdown(
+                                    id='nationality-filter',
+                                    multi=True,
+                                    placeholder="Select nationalities...",
+                                    className='mb-2'
+                                )
+                            ], width=3),
+                            
+                            dbc.Col([
+                                html.Label(
+                                    "Status Filter",
+                                    className='font-medium text-gray-700'
+                                ),
+                                dcc.Dropdown(
+                                    id='status-filter',
+                                    multi=True,
+                                    placeholder="Select statuses...",
+                                    className='mb-2'
+                                )
+                            ], width=3),
+                            
+                            dbc.Col([
+                                html.Label(
+                                    "Type Filter",
+                                    className='font-medium text-gray-700'
+                                ),
+                                dcc.Dropdown(
+                                    id='type-filter',
+                                    multi=True,
+                                    placeholder="Select types...",
+                                    className='mb-2'
+                                )
+                            ], width=3),
+                        ])
                     ])
-                ], className='mb-3'),
-
+                ], className='mb-4'),
+    
+                # Charts Grid
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("Type Distribution"),
+                            dbc.CardBody([
+                                dcc.Graph(id='type-chart')
+                            ])
+                        ], className='h-100')
+                    ], width=6),
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("Status Distribution"),
+                            dbc.CardBody([
+                                dcc.Graph(id='status-chart')
+                            ])
+                        ], className='h-100')
+                    ], width=6),
+                ], className='mb-4'),
+                
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Card([
+                            dbc.CardHeader("Current Visa Step Distribution"),
+                            dbc.CardBody([
+                                dcc.Graph(id='task-chart')
+                            ])
+                        ], className='h-100')
+                    ], width=12),
+                ], className='mb-4'),
+    
+                # Data Table
                 dbc.Card([
-                    dbc.CardHeader("Folder Distribution"),
+                    dbc.CardHeader([
+                        html.Div([
+                            html.H3("Delayed Cases", className='text-lg font-bold mb-0'),
+                            html.P("Cases exceeding their threshold delays", 
+                                className='text-sm text-gray-500 mt-1 mb-0')
+                        ], className='flex-grow'),
+                        html.Div([
+                            html.Button([
+                                html.I(className="fas fa-table mr-2"),
+                                "Download Table Data"
+                            ],
+                            id='download-table-button',
+                            className='bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition-colors duration-200 flex items-center'
+                            ),
+                            dcc.Download(id='download-table-data-xlsx')
+                        ], className='flex items-center')
+                    ], className='flex justify-between items-center'),
                     dbc.CardBody([
-                        html.Div(id='distribution-status'),
-                        html.Div(id='user-links', className='mt-3'),
-                        dbc.Button("Distribute Folders", id='distribute-button', color='primary', className='mt-3')
+                        dash_table.DataTable(
+                            id='delayed-maids-table',
+                            columns=self.create_datatable_columns(),
+                            dropdown={
+                                'Assignee': {
+                                    'options': [{'label': name, 'value': name} for name in ASSIGNEES]
+                                }
+                            },
+                            editable=True,
+                            row_deletable=True,
+                            sort_action='native',
+                            sort_mode='multi',
+                            filter_action='native',
+                            page_size=15,
+                            style_table={'overflowX': 'auto'},
+                            style_data_conditional=self.create_datatable_style_conditions(),
+                            style_header=self.create_datatable_style_header(),
+                            style_cell=self.create_datatable_style_cell()
+                        )
                     ])
                 ])
-            ], width=12, lg=4)
+            ], className='p-4 bg-gray-50')
         ])
-    ], fluid=True)
-
-
-
-def format_metrics(metrics):
-    """Formats image metrics for display."""
-    return html.Div([
-        html.P(f"{key.replace('_', ' ').title()}: {value:.2f}" if isinstance(value, float) else f"{key.replace('_', ' ').title()}: {value}")
-        for key, value in metrics.items()
-    ])
-
-def create_review_layout(token):
-    user = user_manager.get_user_by_token(token)
-    if not user:
-        return html.Div("Invalid access token", className='text-center p-5')
+    def setup_callbacks(self):
+        """Setup all callbacks for the dashboard"""
+        @self.app.callback(
+        Output('download-table-data-xlsx', 'data'),
+        Input('download-table-button', 'n_clicks'),
+        State('delayed-maids-table', 'data'),
+        prevent_initial_call=True
+    )
+        def download_table_data(n_clicks, table_data):
+            """Handle downloading current table data to Excel with specific columns excluded"""
+            if n_clicks is None or not table_data:
+                return None
+            
+            try:
+                # Convert table data to DataFrame
+                df = pd.DataFrame(table_data)
+                
+                # List of columns to exclude
+                columns_to_exclude = [
+                    'Number of Pending Tasks',
+                    'Work Permit Expiry Date',
+                    'Notes',
+                    'Priority',
+                    'Is Delayed',
+                    'Last Updated'
+                ]
+                
+                # Remove specified columns if they exist in the DataFrame
+                columns_to_keep = [col for col in df.columns if col not in columns_to_exclude]
+                df_filtered = df[columns_to_keep]
+                
+                # Format timestamp for filename
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                
+                # Prepare Excel file
+                return dcc.send_data_frame(
+                    df_filtered.to_excel,
+                    f'delayed_maids_table_export_{timestamp}.xlsx',
+                    sheet_name='Delayed Cases',
+                    index=False
+                )
+            except Exception as e:
+                print(f"Error exporting table data: {e}")
+                return None
+        # Callback for threshold settings collapse
+        @self.app.callback(
+            Output('threshold-settings-collapse', 'is_open'),
+            [Input('toggle-threshold-settings', 'n_clicks')],
+            [State('threshold-settings-collapse', 'is_open')]
+        )
+        def toggle_threshold_settings(n_clicks, is_open):
+            if n_clicks:
+                return not is_open
+            return is_open
     
-    return dbc.Container([
-        html.H2(f"Welcome, {user['username']}!", className='text-center mb-4'),
-        dcc.Store(id='user-token-store', data={'token': token}),
-        dcc.Store(id='review-session-store', data={}),  # Initialized empty; data will be set in callback
+        # Main dashboard update callback
+        @self.app.callback(
+            [Output('delayed-maids-table', 'data'),
+             Output('type-chart', 'figure'),
+             Output('status-chart', 'figure'),
+             Output('task-chart', 'figure'),
+             Output('total-delayed-cases', 'children'),
+             Output('critical-cases', 'children'),
+             Output('unassigned-cases', 'children'),
+             Output('task-filter', 'options'),
+             Output('nationality-filter', 'options'),
+             Output('status-filter', 'options'),
+             Output('type-filter', 'options'),
+             Output('last-update-time', 'children')],
+            [Input('upload-data', 'contents'),
+             Input('task-filter', 'value'),
+             Input('nationality-filter', 'value'),
+             Input('status-filter', 'value'),
+             Input('type-filter', 'value'),
+             Input('update-thresholds-button', 'n_clicks')],
+            [State('upload-data', 'filename'),
+             State({'type': 'threshold-input', 'task': ALL}, 'value'),
+             State({'type': 'threshold-input', 'task': ALL}, 'id')]
+        )
+        def update_dashboard(contents, task_filter, nat_filter, status_filter, 
+                           type_filter, n_clicks, filename, threshold_values, threshold_ids):
+            """Main callback to update the dashboard"""
+            trigger = callback_context.triggered[0] if callback_context.triggered else None
+            triggered_id = trigger['prop_id'] if trigger else None
+            
+            try:
+                # Update thresholds if button was clicked
+                if triggered_id == 'update-thresholds-button.n_clicks' and threshold_values and threshold_ids:
+                    for threshold_id, value in zip(threshold_ids, threshold_values):
+                        task = threshold_id['task']
+                        if value is not None and value > 0:
+                            self.task_thresholds[task] = value
+                    
+                    if not self.current_data.empty:
+                        self.current_data['Threshold Hours'] = self.current_data['Task'].map(self.task_thresholds)
+                        self.current_data['Priority'] = self.current_data.apply(self.calculate_priority, axis=1)
+                        self.current_data['Is Delayed'] = self.current_data.apply(
+                            lambda row: float(row['Real Delay (hours)']) > self.task_thresholds.get(row['Task'], 24)
+                            if pd.notna(row['Real Delay (hours)']) and pd.notna(row['Task'])
+                            else False,
+                            axis=1
+                        )
+    
+                # Process new file upload
+                if contents is not None:
+                    content_type, content_string = contents.split(',')
+                    decoded = base64.b64decode(content_string)
+                    
+                    if filename.lower().endswith('.csv'):
+                        df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+                    elif filename.lower().endswith(('.xls', '.xlsx')):
+                        df = pd.read_excel(io.BytesIO(decoded))
+                    else:
+                        raise ValueError("Unsupported file format")
+                    
+                    self.current_data = self.process_data(df)
+    
+                # Return empty state if no data
+                if self.current_data.empty:
+                    return [], {}, {}, {}, '0', '0', '0', [], [], [], [], 'No data loaded'
+    
+                # Get only delayed cases
+                filtered_df = self.current_data[self.current_data['Is Delayed'] == True].copy()
+                
+                # Apply filters
+                if task_filter:
+                    filtered_df = filtered_df[filtered_df['Task'].isin(task_filter)]
+                if nat_filter:
+                    filtered_df = filtered_df[filtered_df['Housemaid Nationality'].isin(nat_filter)]
+                if status_filter:
+                    filtered_df = filtered_df[filtered_df['Housemaid Status'].isin(status_filter)]
+                if type_filter:
+                    filtered_df = filtered_df[filtered_df['Housemaid Type'].isin(type_filter)]
+    
+                # Calculate statistics
+                total_delayed = len(filtered_df)
+                critical_cases = len(filtered_df[
+                    filtered_df['Real Delay (hours)'] > filtered_df['Threshold Hours'] * 2
+                ])
+                unassigned_cases = len(filtered_df[filtered_df['Assignee'] == 'Unassigned'])
+    
+                # Create charts
+                charts = self.create_summary_charts(filtered_df)
+    
+                # Prepare filter options with counts
+                def prepare_filter_options(column):
+                    counts = filtered_df[column].value_counts()
+                    return [
+                        {'label': f"{val} ({counts[val]})", 'value': val}
+                        for val in sorted(counts.index)
+                    ]
+    
+                # Update timestamp
+                last_update = f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+                return (
+                    filtered_df.to_dict('records'),
+                    charts['type'],
+                    charts['status'],
+                    charts['task'],
+                    str(total_delayed),
+                    str(critical_cases),
+                    str(unassigned_cases),
+                    prepare_filter_options('Task'),
+                    prepare_filter_options('Housemaid Nationality'),
+                    prepare_filter_options('Housemaid Status'),
+                    prepare_filter_options('Housemaid Type'),
+                    last_update
+                )
+    
+            except Exception as e:
+                print(f"Error updating dashboard: {e}")
+                return [], {}, {}, {}, '0', '0', '0', [], [], [], [], f'Error: {str(e)}'
+    
+        # Callback for table cell updates
+        @self.app.callback(
+            Output('delayed-maids-table', 'data', allow_duplicate=True),
+            [Input('delayed-maids-table', 'data_timestamp')],
+            [State('delayed-maids-table', 'data'),
+             State('delayed-maids-table', 'data_previous')],
+            prevent_initial_call=True
+        )
+        def update_table_data(timestamp, current_data, previous_data):
+            """Update table when data changes"""
+            if not current_data:
+                return []
+    
+            try:
+                # Find changed rows
+                if previous_data:
+                    changed_rows = [
+                        i for i, (curr, prev) in enumerate(zip(current_data, previous_data))
+                        if curr != prev
+                    ]
+                else:
+                    changed_rows = range(len(current_data))
+    
+                # Update changed rows
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                for idx in changed_rows:
+                    row = current_data[idx]
+                    row['Last Updated'] = current_time
+                    
+                    # Update priority based on current delay
+                    try:
+                        delay = float(row['Real Delay (hours)'])
+                        threshold = float(row['Threshold Hours'])
+                        
+                        if delay > threshold * 2:
+                            row['Priority'] = 'High'
+                        elif delay > threshold:
+                            row['Priority'] = 'Medium'
+                        else:
+                            row['Priority'] = 'Low'
+                    except:
+                        row['Priority'] = 'Low'
+    
+                return current_data
+    
+            except Exception as e:
+                print(f"Error updating table data: {e}")
+                return current_data
+    
+        # Callback for data export
+        @self.app.callback(
+            Output('download-dataframe-xlsx', 'data'),
+            Input('export-button', 'n_clicks'),
+            prevent_initial_call=True
+        )
+        def export_data(n_clicks):
+            """Handle exporting data to Excel"""
+            if n_clicks is None or self.current_data.empty:
+                return None
+            
+            try:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                return dcc.send_data_frame(
+                    self.current_data.to_excel,
+                    f'delayed_maids_export_{timestamp}.xlsx',
+                    sheet_name='Delayed Maids'
+                )
+            except Exception as e:
+                print(f"Error exporting data: {e}")
+                return None
+    
+    def run_server(self, debug=True, port=8050, host='0.0.0.0'):
+        """Run the Dash server"""
+        print(f"\nStarting Delayed Maids Dashboard...")
+        print(f"Server initialization time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"\nServer Configuration:")
+        print(f"- Host: {host}")
+        print(f"- Port: {port}")
+        print(f"- Debug Mode: {debug}")
+        print(f"\nDashboard is available at:")
+        print(f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}")
+        
+        self.app.run_server(debug=debug, port=port, host=host)
 
-        dbc.Row([
-            dbc.Col([
-                html.H5("Before", className='text-center'),
-                html.Img(
-                    id='before-image',
-                    src='',  # Initialize with an empty string or placeholder
-                    className='img-fluid',
-                    style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}
-                ),
-            ], md=6),
-            dbc.Col([
-                html.H5("After", className='text-center'),
-                html.Img(
-                    id='after-image',
-                    src='',  # Initialize with an empty string or placeholder
-                    className='img-fluid',
-                    style={'height': '300px', 'width': 'auto', 'margin-left': '200px'}
-                ),
-            ], md=6),
-        ]),
-        dbc.Row([
-            dbc.Col([
-                html.Div([
-                    dbc.Button("Accept", id='accept-button', color='success', className='me-2'),
-                    dbc.Button("Reject", id='reject-button', color='danger', className='ms-2'),
-                ], id='review-buttons'),
-            ], className='text-center mt-4')
-        ]),
-        dbc.Row([
-            dbc.Col([
-                dbc.Progress(id='review-progress', className='mt-4'),
-                html.Div(id='review-status', className='text-center mt-2')
-            ])
-        ])
-    ], fluid=True)
-
-
-# URL Routing
-app.layout = html.Div([
-    dcc.Location(id='url', refresh=False),
-    html.Div(id='page-content')
-])
-
-@callback(
-    Output('page-content', 'children'),
-    Input('url', 'pathname'),
-    Input('url', 'search')
-)
-def display_page(pathname, search):
-    if pathname == CONFIG['REVIEW_PATH']:
-        token = search.split('=')[-1] if search else None
-        return create_review_layout(token)
-    return create_admin_layout()
-
-@callback(
-    [Output('user-list', 'children'),
-     Output('user-selection-checklist', 'options'),
-     Output('username-input', 'value'),
-     Output('email-input', 'value'),
-     Output('user-action-status', 'children')],
-    [Input('add-user-button', 'n_clicks'),
-     Input('refresh-users-button', 'n_clicks')],
-    [State('username-input', 'value'),
-     State('email-input', 'value')]
-)
-def update_user_list(add_user_clicks, refresh_users_clicks, username, email):
-    ctx = dash.callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
-
-    # Initialize return variables
-    user_list = html.Div()
-    options = []
-    username_value = username
-    email_value = email
-    status_message = ''
-
-    if triggered_id == 'add-user-button':
-        if username and email:
-            user_manager.add_user(username, email)
-            status_message = html.Div("User added successfully.", className='text-success')
-            username_value = ''
-            email_value = ''
-        else:
-            status_message = html.Div("Please enter both username and email.", className='text-danger')
-
-    elif triggered_id == 'refresh-users-button':
-        user_manager.load_users_from_sheet()
-        status_message = html.Div("Users refreshed from Google Sheet.", className='text-info')
-
-    # Update user list and options after any action
-    users = user_manager.users
-    user_list = html.Div([
-        dbc.ListGroup([dbc.ListGroupItem(f"{info['username']} ({info['email']})") for info in users.values()])
-    ])
-    options = [{'label': f"{info['username']} ({info['email']})", 'value': user_id} for user_id, info in users.items()]
-
-    return user_list, options, username_value, email_value, status_message
-
-@callback(
-    [Output('distribution-status', 'children'),
-     Output('user-links', 'children')],
-    Input('distribute-button', 'n_clicks'),
-    [State('user-selection-checklist', 'value')]
-)
-def distribute_folders_callback(n_clicks, selected_users):
-    if not n_clicks or not selected_users:
-        raise PreventUpdate
-
-    # Get folder names from the 'Names' sheet
-    folder_names = get_folder_names_from_sheet(DATABASE_SHEET_ID)
-
-    if not folder_names:
-        return html.Div("No folders available.", className='text-warning'), None
-
-    # Distribute folders among selected users
-    success = user_manager.distribute_folders(folder_names, selected_users)
-    if not success:
-        return html.Div("Error distributing folders.", className='text-danger'), None
-
-    links = [html.Div([
-                html.H6(f"{user_manager.users[user_id]['username']}"),
-                html.P(f"Review Link: {CONFIG['BASE_URL']}{CONFIG['REVIEW_PATH']}?token={user_manager.users[user_id]['access_token']}")
-            ]) for user_id in selected_users]
-    return html.Div("Folders distributed successfully!", className='text-success'), html.Div(links)
-
-
-@callback(
-    Output('review-session-store', 'data'),
-    Input('url', 'pathname'),
-    State('user-token-store', 'data')
-)
-def initialize_review_session(pathname, token_data):
-    if pathname != CONFIG['REVIEW_PATH'] or not token_data:
-        raise PreventUpdate
-
-    user = user_manager.get_user_by_token(token_data['token'])
-    if not user:
-        raise PreventUpdate
-
-    # Fetch assigned folders once
-    assigned_folders = user_manager.get_user_assignments(user['access_token'])
-
-    # Fetch reviewed folders
-    reviewed_folders = get_reviewed_folders_from_sheet(user['username'])
-
-    # Store both assigned and reviewed folders
-    return {
-        'assigned_folders': assigned_folders,
-        'reviewed': list(reviewed_folders)
-    }
-
-@callback(
-    Output('review-session-store', 'data', allow_duplicate=True),
-    [Input('accept-button', 'n_clicks'), Input('reject-button', 'n_clicks')],
-    [State('user-token-store', 'data'), State('review-session-store', 'data')],
-    prevent_initial_call=True
-)
-def log_review_to_sheets_and_session(accept_clicks, reject_clicks, token_data, session_data):
-    if not token_data or not session_data:
-        raise PreventUpdate
-
-    user = user_manager.get_user_by_token(token_data['token'])
-    if not user:
-        raise PreventUpdate
-
-    assigned_folders = session_data['assigned_folders']
-    reviewed_set = set(session_data['reviewed'])
-    unreviewed = [folder for folder in assigned_folders if folder not in reviewed_set]
-
-    if not unreviewed:
-        return dash.no_update
-
-    current_folder_name = unreviewed[0]
-
-    ctx = dash.callback_context
-    if ctx.triggered:
-        button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-        decision = 'accept' if button_id == 'accept-button' else 'reject'
-        review_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        reviewer = user['username']
-        review_row = [current_folder_name, review_date, reviewer, decision]
-
-        # Log to Google Sheets
-        try:
-            sheets_service.spreadsheets().values().append(
-                spreadsheetId=SHEET_ID,
-                range='Sheet1!A2',
-                valueInputOption='RAW',
-                insertDataOption='INSERT_ROWS',
-                body={'values': [review_row]}
-            ).execute()
-        except Exception as e:
-            print(f"Error logging review to Google Sheets: {e}")
-            return dash.no_update
-
-        # Update the reviewed data in session
-        reviewed_set.add(current_folder_name)
-        session_data['reviewed'] = list(reviewed_set)
-        return session_data
-
-    return dash.no_update
-
-
-
-def get_reviewed_folders_from_sheet(reviewer_username, retries=3, delay=1):
-    """Retrieve reviewed folders from the Google Sheet for a specific reviewer with retries."""
-    for attempt in range(retries):
-        try:
-            response = sheets_service.spreadsheets().values().get(
-                spreadsheetId=SHEET_ID,
-                range='Sheet1!A2:D'  # Adjusted range to include the 'Reviewer' column
-            ).execute()
-            # Convert list of rows to a set of reviewed folder names by the reviewer
-            reviewed_folders = {
-                row[0] for row in response.get('values', [])
-                if len(row) >= 3 and row[2] == reviewer_username  # Check if 'Reviewer' matches
-            }
-            return reviewed_folders
-        except Exception as e:
-            print(f"Attempt {attempt + 1}: Error retrieving reviewed folders from Google Sheet: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)  # Wait before retrying
-            else:
-                print("Max retries reached. Unable to retrieve updated data from Google Sheets.")
-                return set()
-
-@callback(
-    [
-        Output('before-image', 'src'),
-        Output('after-image', 'src'),
-        Output('review-progress', 'value'),
-        Output('review-status', 'children'),
-        Output('review-buttons', 'style')
-    ],
-    Input('review-session-store', 'data'),
-    State('user-token-store', 'data')
-)
-def handle_review(session_data, token_data):
-    if not token_data or not session_data:
-        raise PreventUpdate
-
-    user = user_manager.get_user_by_token(token_data['token'])
-    if not user:
-        raise PreventUpdate
-
-    assigned_folders = session_data['assigned_folders']
-    reviewed_folders = set(session_data['reviewed'])
-    unreviewed = [folder for folder in assigned_folders if folder not in reviewed_folders]
-
-    if not unreviewed:
-        return None, None, 100, "All folders reviewed!", {'display': 'none'}
-
-    current_folder_name = unreviewed[0]
-
-    folder_data = review_app.folders.get(current_folder_name)
-    if not folder_data:
-        return None, None, 0, f"Error loading folder {current_folder_name}", {'display': 'none'}
-
-    before_image_url = folder_data['before_image_url']
-    after_image_url = folder_data['after_image_url']
-
-    total_folders = len(assigned_folders)
-    reviewed_count = len(reviewed_folders)
-    progress = (reviewed_count / total_folders) * 100
-    status_message = f"Reviewed {reviewed_count} of {total_folders} folders"
-
-    return before_image_url, after_image_url, progress, status_message, {'display': 'block'}
-
-
+app = DelayedMaidsApp()
+app.setup_layout()
+app.setup_callbacks()
+server = app.app.server
+# Main execution
 if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)
+    try:      
+        app.run_server(debug=True, port=8075)
+    except Exception as e:
+        print(f"\nError starting server: {e}")
+        raise

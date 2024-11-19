@@ -1,18 +1,18 @@
 dash
 dash-bootstrap-components
 pandas
-numpy
+# numpy
 plotly
-xlsxwriter
+# xlsxwriter
 gunicorn  # For production server
-google-auth  # For Google OAuth2 credentials
-google-api-python-client  # For using Google API (e.g., Google Sheets, Drive, etc.)
-openpyxl
-pyotp
-pyzbar
-Pillow
-opencv-python-headless
-gspread
-oauth2client
-beautifulsoup4  # For parsing HTML with BeautifulSoup
-requests  # For making HTTP requests
+# google-auth  # For Google OAuth2 credentials
+# google-api-python-client  # For using Google API (e.g., Google Sheets, Drive, etc.)
+# openpyxl
+# pyotp
+# pyzbar
+# Pillow
+# opencv-python-headless
+# gspread
+# oauth2client
+# beautifulsoup4  # For parsing HTML with BeautifulSoup
+# requests  # For making HTTP requests
